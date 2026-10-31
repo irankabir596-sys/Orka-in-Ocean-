@@ -1,5 +1,5 @@
 
-"""Binance Spot Top-200 live-candle RSI scanner + Telegram subscriber bot."""
+"""Binance Spot Top-200 live-candle RSI scanner + Telegram bot."""
 
 from __future__ import annotations
 
@@ -33,7 +33,7 @@ TELEGRAM_BOT_TOKEN = os.getenv(
 ).strip()
 
 
-# Scanner settings
+# Scanner configuration
 
 RSI_PERIOD = 14
 TOP_N = 200
@@ -45,6 +45,8 @@ RSI_LOW = 40.0
 MAX_WORKERS = 8
 TELEGRAM_MESSAGE_LIMIT = 3900
 KLINE_LIMIT = 500
+
+SCAN_INTERVAL_MINUTES = 15
 
 
 STABLE_BASE_ASSETS = {
@@ -347,8 +349,6 @@ def get_symbol_rsi(symbol, expected_open_time):
 
         return None
 
-    # Confirm the last candle is the current open candle
-
     if int(klines[-1][0]) != expected_open_time:
 
         return None
@@ -452,8 +452,6 @@ def scan_market():
                     symbol,
                     type(exc).__name__
                 )
-
-    # Highest RSI first
 
     results.sort(
         key=lambda item: item[1],
@@ -616,8 +614,6 @@ def process_telegram_updates(state, subscribers):
 
                 subscribers.add(chat_id)
 
-                # IMPORTANT:
-                # Request a new scan even if already subscribed.
                 state["scan_requested"] = True
 
                 if is_new:
@@ -644,11 +640,6 @@ def process_telegram_updates(state, subscribers):
                         "text": reply,
                         "disable_web_page_preview": True
                     }
-                )
-
-                log.info(
-                    "Scan requested by chat %s",
-                    chat_id
                 )
 
             elif command == "/stop":
@@ -696,12 +687,7 @@ def tradingview_url(symbol):
 
 # Build English-only Telegram report
 
-def build_report(
-    results,
-    scanned,
-    valid,
-    scan_time
-):
+def build_report(results, scanned, valid, scan_time):
 
     timestamp = scan_time.astimezone(
         timezone.utc
@@ -762,7 +748,6 @@ def build_report(
 def send_report(subscribers, messages):
 
     removed = set()
-    successful_deliveries = 0
 
     for chat_id in sorted(subscribers):
 
@@ -779,8 +764,6 @@ def send_report(subscribers, messages):
                         "disable_web_page_preview": True
                     }
                 )
-
-            successful_deliveries += 1
 
         except Exception as exc:
 
@@ -799,23 +782,18 @@ def send_report(subscribers, messages):
 
                 removed.add(chat_id)
 
-    log.info(
-        "Report delivered to %d subscribers.",
-        successful_deliveries
-    )
-
     return removed
 
 
-# Half-hour scheduling bucket
+# 15-minute scheduling bucket
 
-def current_half_hour_bucket(now):
+def current_scan_bucket(now):
 
     now = now.astimezone(timezone.utc)
 
     minute_bucket = (
-        0 if now.minute < 30 else 30
-    )
+        now.minute // SCAN_INTERVAL_MINUTES
+    ) * SCAN_INTERVAL_MINUTES
 
     return now.replace(
         minute=minute_bucket,
@@ -845,13 +823,11 @@ def main():
         }
     )
 
-    # Ensure the new state field exists for older state files.
-
     state.setdefault("scan_requested", False)
 
     subscribers = load_subscribers()
 
-    # First process Telegram commands.
+    # Process Telegram commands
 
     process_telegram_updates(
         state,
@@ -862,7 +838,7 @@ def main():
 
     now = datetime.now(timezone.utc)
 
-    bucket = current_half_hour_bucket(now)
+    bucket = current_scan_bucket(now)
 
     force_scan = (
         os.getenv("FORCE_SCAN", "false").lower()
@@ -871,11 +847,7 @@ def main():
 
     if not subscribers:
 
-        log.info(
-            "No subscribers yet. Share the bot link."
-        )
-
-        state["last_scan_bucket"] = bucket
+        log.info("No subscribers yet.")
 
         state["scan_requested"] = False
 
@@ -886,7 +858,7 @@ def main():
     ):
 
         log.info(
-            "Starting RSI scan: %s",
+            "Starting 15-minute RSI scan: %s",
             bucket
         )
 
@@ -910,17 +882,10 @@ def main():
 
             save_subscribers(subscribers)
 
-            # Mark this bucket as scanned only after scan succeeds.
-
             state["last_scan_bucket"] = bucket
-
-            # Clear the request only after successful report delivery attempt.
-
             state["scan_requested"] = False
 
-            log.info(
-                "RSI scan and report completed successfully."
-            )
+            log.info("RSI report completed.")
 
         except Exception as exc:
 
@@ -929,13 +894,10 @@ def main():
                 type(exc).__name__
             )
 
-            # Keep scan_requested=True if it was requested.
-            # Do not mark the bucket as completed after a failure.
-
     else:
 
         log.info(
-            "This half-hour bucket has already been scanned."
+            "This 15-minute bucket has already been scanned."
         )
 
     save_json(
