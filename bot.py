@@ -1,4 +1,6 @@
+
 """Binance Spot Top-200 live-candle RSI scanner + Telegram subscriber bot."""
+
 from __future__ import annotations
 
 import html
@@ -7,15 +9,17 @@ import logging
 import os
 import sys
 import time
+
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 from urllib.parse import quote
 
 import requests
 
+
 ROOT = Path(__file__).resolve().parent
+
 SUBSCRIBERS_FILE = ROOT / "subscribers.json"
 STATE_FILE = ROOT / "bot_state.json"
 
@@ -28,6 +32,9 @@ TELEGRAM_BOT_TOKEN = os.getenv(
     "TELEGRAM_BOT_TOKEN", ""
 ).strip()
 
+
+# Scanner settings
+
 RSI_PERIOD = 14
 TOP_N = 200
 INTERVAL = "1h"
@@ -37,7 +44,8 @@ RSI_LOW = 40.0
 
 MAX_WORKERS = 8
 TELEGRAM_MESSAGE_LIMIT = 3900
-KLINE_LIMIT = 100
+KLINE_LIMIT = 500
+
 
 STABLE_BASE_ASSETS = {
     "USDC", "FDUSD", "TUSD", "USDP", "DAI",
@@ -51,6 +59,7 @@ LEVERAGED_SUFFIXES = (
     "UP", "DOWN", "BULL", "BEAR"
 )
 
+
 logging.basicConfig(
     level=os.getenv("LOG_LEVEL", "INFO").upper(),
     format="%(asctime)s | %(levelname)s | %(message)s",
@@ -62,6 +71,8 @@ log = logging.getLogger("binance-rsi-scanner")
 class APIError(RuntimeError):
     pass
 
+
+# JSON storage
 
 def load_json(path, default):
 
@@ -75,6 +86,7 @@ def load_json(path, default):
         return default.copy()
 
     except (json.JSONDecodeError, OSError):
+        log.warning("Could not read %s", path.name)
         return default.copy()
 
 
@@ -97,6 +109,8 @@ def save_json(path, data):
 
     temp_path.replace(path)
 
+
+# HTTP requests
 
 def http_json(url, params=None, timeout=(8, 25)):
 
@@ -122,6 +136,11 @@ def http_json(url, params=None, timeout=(8, 25)):
                         )
                     ),
                     20.0
+                )
+
+                log.warning(
+                    "Rate limited. Waiting %.1f seconds.",
+                    wait
                 )
 
                 time.sleep(max(wait, 1.0))
@@ -227,6 +246,8 @@ def calculate_rsi_wilder(
     )
 
 
+# Symbol filters
+
 def is_leveraged_or_stable(base_asset):
 
     base = base_asset.upper()
@@ -308,10 +329,7 @@ def get_top_usdt_spot_symbols(limit=TOP_N):
 
 # Calculate RSI using the currently forming candle
 
-def get_symbol_rsi(
-    symbol,
-    expected_open_time
-):
+def get_symbol_rsi(symbol, expected_open_time):
 
     klines = binance_get(
         "/api/v3/klines",
@@ -329,7 +347,7 @@ def get_symbol_rsi(
 
         return None
 
-    # Make sure the last candle is the current open candle
+    # Confirm the last candle is the current open candle
 
     if int(klines[-1][0]) != expected_open_time:
 
@@ -379,6 +397,11 @@ def scan_market():
 
     valid_count = 0
     failures = 0
+
+    log.info(
+        "Starting scan of %d symbols.",
+        len(symbols)
+    )
 
     with ThreadPoolExecutor(
         max_workers=MAX_WORKERS
@@ -438,9 +461,11 @@ def scan_market():
     )
 
     log.info(
-        "Scan complete: %d symbols, %d valid, %d signals",
+        "Scan complete: %d symbols, %d valid, "
+        "%d failed, %d signals",
         len(symbols),
         valid_count,
+        failures,
         len(results)
     )
 
@@ -569,8 +594,6 @@ def process_telegram_updates(state, subscribers):
             message = update.get("message") or {}
             chat = message.get("chat") or {}
 
-            # Only private chats
-
             if chat.get("type") != "private":
                 continue
 
@@ -593,33 +616,40 @@ def process_telegram_updates(state, subscribers):
 
                 subscribers.add(chat_id)
 
+                # IMPORTANT:
+                # Request a new scan even if already subscribed.
+                state["scan_requested"] = True
+
                 if is_new:
 
-                    telegram_api(
-                        "sendMessage",
-                        {
-                            "chat_id": chat_id,
-                            "text": (
-                                "You are subscribed to "
-                                "Binance RSI Scanner.\n"
-                                "Use /stop to unsubscribe."
-                            ),
-                            "disable_web_page_preview": True
-                        }
+                    reply = (
+                        "You are subscribed to "
+                        "Binance RSI Scanner.\n"
+                        "A new RSI scan has been requested.\n"
+                        "Use /stop to unsubscribe."
                     )
 
                 else:
 
-                    telegram_api(
-                        "sendMessage",
-                        {
-                            "chat_id": chat_id,
-                            "text": (
-                                "You are already subscribed.\n"
-                                "Use /stop to unsubscribe."
-                            )
-                        }
+                    reply = (
+                        "You are already subscribed.\n"
+                        "A new RSI scan has been requested.\n"
+                        "Use /stop to unsubscribe."
                     )
+
+                telegram_api(
+                    "sendMessage",
+                    {
+                        "chat_id": chat_id,
+                        "text": reply,
+                        "disable_web_page_preview": True
+                    }
+                )
+
+                log.info(
+                    "Scan requested by chat %s",
+                    chat_id
+                )
 
             elif command == "/stop":
 
@@ -732,6 +762,7 @@ def build_report(
 def send_report(subscribers, messages):
 
     removed = set()
+    successful_deliveries = 0
 
     for chat_id in sorted(subscribers):
 
@@ -749,12 +780,15 @@ def send_report(subscribers, messages):
                     }
                 )
 
+            successful_deliveries += 1
+
         except Exception as exc:
 
             error_text = str(exc).lower()
 
             log.warning(
-                "Could not deliver report (%s)",
+                "Could not deliver report to %s (%s)",
+                chat_id,
                 type(exc).__name__
             )
 
@@ -764,6 +798,11 @@ def send_report(subscribers, messages):
             ):
 
                 removed.add(chat_id)
+
+    log.info(
+        "Report delivered to %d subscribers.",
+        successful_deliveries
+    )
 
     return removed
 
@@ -801,11 +840,18 @@ def main():
         STATE_FILE,
         {
             "update_offset": None,
-            "last_scan_bucket": None
+            "last_scan_bucket": None,
+            "scan_requested": False
         }
     )
 
+    # Ensure the new state field exists for older state files.
+
+    state.setdefault("scan_requested", False)
+
     subscribers = load_subscribers()
+
+    # First process Telegram commands.
 
     process_telegram_updates(
         state,
@@ -831,8 +877,11 @@ def main():
 
         state["last_scan_bucket"] = bucket
 
+        state["scan_requested"] = False
+
     elif (
         force_scan
+        or state.get("scan_requested", False)
         or state.get("last_scan_bucket") != bucket
     ):
 
@@ -859,16 +908,29 @@ def main():
 
             subscribers -= removed
 
+            save_subscribers(subscribers)
+
+            # Mark this bucket as scanned only after scan succeeds.
+
             state["last_scan_bucket"] = bucket
 
-            save_subscribers(subscribers)
+            # Clear the request only after successful report delivery attempt.
+
+            state["scan_requested"] = False
+
+            log.info(
+                "RSI scan and report completed successfully."
+            )
 
         except Exception as exc:
 
             log.exception(
-                "Scan failed (%s)",
+                "Scan failed (%s). It will be retried.",
                 type(exc).__name__
             )
+
+            # Keep scan_requested=True if it was requested.
+            # Do not mark the bucket as completed after a failure.
 
     else:
 
