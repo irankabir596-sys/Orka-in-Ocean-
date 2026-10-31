@@ -1,5 +1,5 @@
 {
   "last_scan_bucket": "2026-10-30T21:00Z",
-  "scan_requested": false,
-  "update_offset": 79830117
+  "scan_requested": true,
+  "update_offset": 79830119
 }
