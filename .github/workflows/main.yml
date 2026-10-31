@@ -6,12 +6,6 @@ on:
     - cron: "*/15 * * * *"
 
   workflow_dispatch:
-    inputs:
-      force_scan:
-        description: "Run a scan now"
-        required: false
-        type: boolean
-        default: false
 
 permissions:
   contents: write
@@ -27,10 +21,10 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v7
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: pip
@@ -42,7 +36,6 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           BINANCE_BASE_URL: https://api.binance.com
-          FORCE_SCAN: ${{ inputs.force_scan || false }}
         run: python bot.py
 
       - name: Save subscriber state
@@ -50,8 +43,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
           touch subscribers.json bot_state.json
-          git add -A subscribers.json bot_state.json
+
+          git add -A -- subscribers.json bot_state.json
+
           if ! git diff --cached --quiet; then
             git commit -m "Update subscriber state"
             git push
